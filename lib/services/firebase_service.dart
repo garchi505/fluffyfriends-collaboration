@@ -1,199 +1,274 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// firebase_service.dart
-// Assigned to: Garchitorena
-//
-// PURPOSE:
-// This is the single place where ALL data is read from and written to Firebase.
-// Every other screen calls methods from this file — nothing else touches Firebase directly.
-//
-// YOU NEED TO IMPLEMENT:
-//   - Auth:     signUp, login, logout, currentUser
-//   - Users:    getUserById, getUserByUsername, searchUsers
-//   - Posts:    getFeedStream, getUserPostsStream, searchPosts, createPost
-//   - Likes:    likePost, unlikePost
-//   - Comments: addComment, getCommentsStream
-//   - Follow:   followUser, unfollowUser
-//
-// HOW FIREBASE WORKS IN THIS APP:
-//   Firebase Auth  = handles who is logged in (creates accounts, sessions)
-//   Firestore      = the cloud database (stores users, posts, comments, follows)
-//   Stream         = Firestore pushes live updates to the UI automatically
-//
-// All methods are static — called like: FirebaseService.login(...)
-// ─────────────────────────────────────────────────────────────────────────────
+import 'package:firebase_auth/firebase_auth.dart';   // Firebase Authentication — handles login, signup, logout, session
+import 'package:cloud_firestore/cloud_firestore.dart'; // Firestore — our cloud database for users, posts, comments, follows
 
-// TODO: import firebase_auth package
-// TODO: import cloud_firestore package
+// ─────────────────────────────────────────────────────────────────────────────
+// FirebaseService — the single place where ALL data is read and written.
+// Replaces the old LocalStorageService (Hive) entirely.
+//
+// WHY FIREBASE?
+// Unlike Hive which stored data only on the device, Firebase stores data in
+// the cloud. This means multiple users can see each other's posts, follow each
+// other, and comment in real time — across different devices.
+//
+// HOW IT WORKS:
+// Firebase Auth  = handles who is logged in (email/password accounts)
+// Firestore      = the database (stores users, posts, comments, follow lists)
+// StreamSnapshot = Firestore can push live updates to the UI automatically
+//
+// All methods are static — call them anywhere like: FirebaseService.login(...)
+// ─────────────────────────────────────────────────────────────────────────────
 
 class FirebaseService {
+  // Cached references to Firebase services — created once, reused everywhere
+  static final _auth = FirebaseAuth.instance;  // handles authentication
+  static final _db   = FirebaseFirestore.instance; // handles database reads/writes
 
-  // TODO: Create two static final variables:
-  //   - _auth = FirebaseAuth.instance
-  //     HINT: this handles all authentication operations
-  //   - _db = FirebaseFirestore.instance
-  //     HINT: this handles all database read/write operations
+  // ── Auth ──────────────────────────────────────────────────────────────────────
 
-  // ── Auth ───────────────────────────────────────────────────────────────────
+  // Returns the currently logged-in Firebase user object, or null if nobody is logged in.
+  // Firebase automatically persists the session — no manual saving needed like Hive.
+  static User? get currentUser => _auth.currentUser;
 
-  // TODO: Create a static getter called currentUser that returns User?
-  // HINT: return _auth.currentUser
-  // HINT: Firebase automatically remembers who is logged in — no manual saving needed
+  // Sign up — does two things:
+  //   1. Creates a Firebase Auth account (for login/logout/session)
+  //   2. Saves the user's public profile to Firestore (for display in the app)
+  static Future<User?> signUp({
+    required String fullName,
+    required String username,
+    required String password,
+  }) async {
+    // Check username is unique BEFORE creating the account.
+    // If we didn't check, two users could have the same @username.
+    final existing = await getUserByUsername(username);
+    if (existing != null) {
+      throw Exception('Username already taken.'); // caught by signup screen
+    }
 
-  // TODO: Implement signUp method
-  // Parameters: fullName (String), username (String), password (String)
-  // Returns: Future<User?>
-  // Steps:
-  //   1. Call getUserByUsername(username) to check if username is already taken
-  //      HINT: if result is not null, throw Exception('Username already taken.')
-  //   2. Build a fake email: '$username@fluffyfriends.app'
-  //      HINT: Firebase Auth requires email format — users never see this email
-  //   3. Call _auth.createUserWithEmailAndPassword(email: email, password: password)
-  //      HINT: store result in a variable called cred
-  //   4. Get uid from cred.user!.uid
-  //   5. Save profile to Firestore: _db.collection('users').doc(uid).set({...})
-  //      HINT: store these fields: uid, fullName, username, followers: [], following: [], createdAt
-  //      HINT: use FieldValue.serverTimestamp() for createdAt
-  //   6. Return cred.user
+    // Firebase Auth requires an email address — our app uses usernames instead.
+    // We build a fake email from the username so Firebase Auth is satisfied.
+    // The user never sees this email — they always log in with their username.
+    final email = '$username@fluffyfriends.app';
 
-  // TODO: Implement login method
-  // Parameters: username (String), password (String)
-  // Returns: Future<User?>
-  // Steps:
-  //   1. Build the fake email: '$username@fluffyfriends.app'
-  //      HINT: must match the exact format used in signUp
-  //   2. Call _auth.signInWithEmailAndPassword(email: email, password: password)
-  //   3. Return cred.user
+    // Creates the Firebase Auth account — Firebase assigns a unique uid
+    final cred = await _auth.createUserWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
 
-  // TODO: Implement logout method
-  // Returns: Future<void>
-  // HINT: call _auth.signOut()
-  // HINT: Firebase clears the session automatically after this
+    final uid = cred.user!.uid; // unique ID that Firebase assigns — used everywhere
 
-  // ── Users ──────────────────────────────────────────────────────────────────
+    // Save the user's profile to Firestore so other users can see their name,
+    // follow them, and their posts can display their username.
+    // This is SEPARATE from Auth — Auth handles login, Firestore handles profile.
+    await _db.collection('users').doc(uid).set({
+      'uid':       uid,        // stored here too so we can read it back easily
+      'fullName':  fullName,   // displayed on the profile page (e.g. "Rey Aventura")
+      'username':  username,   // shown on posts and searchable (e.g. "@rey_av")
+      'followers': [],         // list of uids who follow this user — starts empty
+      'following': [],         // list of uids this user follows — starts empty
+      'createdAt': FieldValue.serverTimestamp(), // Firebase server sets this timestamp
+    });
 
-  // TODO: Implement getUserById method
-  // Parameters: uid (String)
-  // Returns: Future<Map<String, dynamic>?>
-  // Steps:
-  //   1. Call _db.collection('users').doc(uid).get()
-  //   2. Return snap.data()
-  //      HINT: .data() returns null if the document doesn't exist
+    return cred.user; // return the Firebase user so the app can get the uid
+  }
 
-  // TODO: Implement getUserByUsername method
-  // Parameters: username (String)
-  // Returns: Future<Map<String, dynamic>?>
-  // Steps:
-  //   1. Query _db.collection('users').where('username', isEqualTo: username).limit(1).get()
-  //      HINT: .limit(1) stops Firestore from reading more than needed
-  //   2. If snap.docs.isEmpty return null
-  //   3. Otherwise return snap.docs.first.data()
+  // Login — rebuilds the fake email from the username and signs in with Firebase Auth.
+  // Firebase Auth handles session persistence automatically after this call.
+  static Future<User?> login({
+    required String username,
+    required String password,
+  }) async {
+    final email = '$username@fluffyfriends.app'; // must match the format used in signUp
+    final cred = await _auth.signInWithEmailAndPassword(
+      email: email,
+      password: password,
+    );
+    return cred.user; // return user so HomeScreen gets the uid
+  }
 
-  // TODO: Implement searchUsers method
-  // Parameters: query (String)
-  // Returns: Future<List<Map<String, dynamic>>>
-  // Steps:
-  //   1. Convert query to lowercase: query.toLowerCase()
-  //   2. Get ALL users: _db.collection('users').get()
-  //   3. Map each doc to its data()
-  //   4. Filter where username OR fullName contains the query (case-insensitive)
-  //   5. Return as list
-  //   HINT: Firestore doesn't support full-text search so we filter client-side
+  // Logout — signs out of Firebase Auth. Firebase clears the session automatically.
+  // After this, FirebaseAuth.instance.currentUser will return null.
+  static Future<void> logout() async {
+    await _auth.signOut();
+  }
 
-  // ── Posts ──────────────────────────────────────────────────────────────────
+  // ── Users ──────────────────────────────────────────────────────────────────────
 
-  // TODO: Implement getFeedStream method
-  // Returns: Stream<QuerySnapshot>
-  // Steps:
-  //   1. Return _db.collection('posts').orderBy('createdAt', descending: true).snapshots()
-  //   HINT: .snapshots() = live stream, updates automatically when data changes
-  //   HINT: descending: true = newest post at the top
+  // Fetches one user's Firestore profile by their Firebase uid.
+  // Returns a Map like {'uid': '...', 'username': 'rex', 'fullName': '...', ...}
+  // Returns null if the user document doesn't exist in Firestore.
+  static Future<Map<String, dynamic>?> getUserById(String uid) async {
+    final snap = await _db.collection('users').doc(uid).get(); // read one document
+    return snap.data(); // .data() returns null if document doesn't exist
+  }
 
-  // TODO: Implement getUserPostsStream method
-  // Parameters: uid (String)
-  // Returns: Stream<QuerySnapshot>
-  // Steps:
-  //   1. Return _db.collection('posts')
-  //      .where('userId', isEqualTo: uid)
-  //      .orderBy('createdAt', descending: true)
-  //      .snapshots()
-  //   HINT: This requires a Firestore composite index (userId ASC, createdAt DESC)
+  // Finds a user by their username — used during login and username uniqueness check.
+  // Firestore doesn't have a built-in username lookup, so we use a where() query.
+  static Future<Map<String, dynamic>?> getUserByUsername(String username) async {
+    final snap = await _db
+        .collection('users')
+        .where('username', isEqualTo: username) // filter to exact username match
+        .limit(1)  // we only ever need one result — stops Firestore reading more
+        .get();
+    if (snap.docs.isEmpty) return null; // no user with that username exists
+    return snap.docs.first.data();      // return the first (and only) match
+  }
 
-  // TODO: Implement searchPosts method
-  // Parameters: query (String)
-  // Returns: Future<List<QueryDocumentSnapshot>>
-  // Steps:
-  //   1. Convert query to lowercase
-  //   2. Get ALL posts: _db.collection('posts').get()
-  //   3. Filter where caption contains the query (case-insensitive)
-  //   4. Return as list
+  // Searches users by username OR full name — used in the Search screen.
+  // Firestore doesn't support full-text search, so we load all users and
+  // filter client-side. Fine for small apps, but would need Algolia at scale.
+  static Future<List<Map<String, dynamic>>> searchUsers(String query) async {
+    final q    = query.toLowerCase(); // normalize to lowercase for case-insensitive match
+    final snap = await _db.collection('users').get(); // loads ALL users
+    return snap.docs
+        .map((d) => d.data()) // convert each document to a Map
+        .where((u) =>
+            (u['username'] as String).toLowerCase().contains(q) || // match username
+            (u['fullName']  as String).toLowerCase().contains(q))  // OR full name
+        .toList();
+  }
 
-  // TODO: Implement createPost method
-  // Parameters: userId, username, caption (all String), imageBytes (List<int>?)
-  // Returns: Future<void>
-  // Steps:
-  //   1. Call _db.collection('posts').add({...})
-  //      HINT: .add() auto-generates the document ID
-  //      HINT: store these fields: userId, username, caption, imageBytes, likes: [], createdAt
-  //      HINT: imageBytes is null if text-only post
-  //      HINT: use FieldValue.serverTimestamp() for createdAt
+  // ── Posts ──────────────────────────────────────────────────────────────────────
 
-  // ── Likes ──────────────────────────────────────────────────────────────────
+  // Returns a LIVE STREAM of all posts sorted newest first.
+  // The feed uses StreamBuilder — it rebuilds automatically whenever anyone posts.
+  // This replaces the old getFeedPosts() which required manual setState() to refresh.
+  static Stream<QuerySnapshot> getFeedStream() {
+    return _db
+        .collection('posts')
+        .orderBy('createdAt', descending: true) // newest post at the top of the feed
+        .snapshots(); // .snapshots() = live stream, pushes updates automatically
+  }
 
-  // TODO: Implement likePost method
-  // Parameters: postId (String), uid (String)
-  // Returns: Future<void>
-  // Steps:
-  //   1. Update the post: _db.collection('posts').doc(postId).update({...})
-  //   2. Set likes: FieldValue.arrayUnion([uid])
-  //      HINT: arrayUnion adds uid without duplicates — atomic and safe
+  // Returns a live stream of ONE user's posts — used in the profile grid.
+  // Requires a Firestore composite index on (userId ASC, createdAt DESC).
+  static Stream<QuerySnapshot> getUserPostsStream(String uid) {
+    return _db
+        .collection('posts')
+        .where('userId', isEqualTo: uid)        // only this user's posts
+        .orderBy('createdAt', descending: true) // newest first
+        .snapshots();
+  }
 
-  // TODO: Implement unlikePost method
-  // Parameters: postId (String), uid (String)
-  // Returns: Future<void>
-  // Steps:
-  //   1. Update the post: _db.collection('posts').doc(postId).update({...})
-  //   2. Set likes: FieldValue.arrayRemove([uid])
-  //      HINT: arrayRemove removes uid if it exists — atomic and safe
+  // Searches posts by caption text — used in the Search screen Posts tab.
+  // Same client-side filter approach as searchUsers().
+  static Future<List<QueryDocumentSnapshot>> searchPosts(String query) async {
+    final q    = query.toLowerCase();
+    final snap = await _db.collection('posts').get(); // loads ALL posts
+    return snap.docs
+        .where((d) => (d['caption'] as String).toLowerCase().contains(q))
+        .toList();
+  }
 
-  // ── Comments ───────────────────────────────────────────────────────────────
+  // Creates a new post document in Firestore.
+  // imageBytes is stored as a List<int> (array of byte values) directly in the document.
+  // This avoids needing Firebase Storage (which requires a paid plan).
+  static Future<void> createPost({
+    required String userId,
+    required String username,
+    required String caption,
+    List<int>? imageBytes, // null if this is a text-only post (no image)
+  }) async {
+    await _db.collection('posts').add({ // .add() auto-generates the document ID
+      'userId':     userId,     // links the post back to its author
+      'username':   username,   // cached so the feed doesn't need a user lookup per post
+      'caption':    caption,    // the text content of the post
+      'imageBytes': imageBytes, // raw image data as int array, or null
+      'likes':      [],         // starts with zero likes
+      'createdAt':  FieldValue.serverTimestamp(), // server sets the exact time
+    });
+  }
 
-  // TODO: Implement addComment method
-  // Parameters: postId, userId, username, text (all String)
-  // Returns: Future<void>
-  // Steps:
-  //   1. Add to sub-collection: _db.collection('posts').doc(postId).collection('comments').add({...})
-  //      HINT: sub-collection path: posts/{postId}/comments/{commentId}
-  //      HINT: store these fields: userId, username, text, createdAt
-  //      HINT: using sub-collection avoids Firestore's 1MB document size limit
+  // ── Likes ──────────────────────────────────────────────────────────────────────
 
-  // TODO: Implement getCommentsStream method
-  // Parameters: postId (String)
-  // Returns: Stream<QuerySnapshot>
-  // Steps:
-  //   1. Return _db.collection('posts').doc(postId).collection('comments')
-  //      .orderBy('createdAt').snapshots()
-  //      HINT: orderBy WITHOUT descending = oldest first (like a chat conversation)
+  // Adds the user's uid to the post's likes array.
+  // arrayUnion is atomic — safe if multiple people like at the same moment.
+  // It also prevents duplicates — liking twice doesn't add the uid twice.
+  static Future<void> likePost(String postId, String uid) async {
+    await _db.collection('posts').doc(postId).update({
+      'likes': FieldValue.arrayUnion([uid]), // add uid to likes array if not already there
+    });
+  }
 
-  // ── Follow ─────────────────────────────────────────────────────────────────
+  // Removes the user's uid from the post's likes array.
+  // arrayRemove is also atomic — safe for concurrent operations.
+  static Future<void> unlikePost(String postId, String uid) async {
+    await _db.collection('posts').doc(postId).update({
+      'likes': FieldValue.arrayRemove([uid]), // remove uid from likes array
+    });
+  }
 
-  // TODO: Implement followUser method
-  // Parameters: myUid (String), theirUid (String)
-  // Returns: Future<void>
-  // Steps:
-  //   1. Create a batch: _db.batch()
-  //      HINT: batch groups multiple writes into one atomic operation
-  //      HINT: if one fails, both fail — prevents inconsistent data
-  //   2. batch.update myUid's document: add theirUid to 'following' using arrayUnion
-  //   3. batch.update theirUid's document: add myUid to 'followers' using arrayUnion
-  //   4. await batch.commit()
-  //      HINT: both updates happen simultaneously
+  // ── Comments ──────────────────────────────────────────────────────────────────
 
-  // TODO: Implement unfollowUser method
-  // Parameters: myUid (String), theirUid (String)
-  // Returns: Future<void>
-  // Steps:
-  //   1. Create a batch: _db.batch()
-  //   2. batch.update myUid's document: remove theirUid from 'following' using arrayRemove
-  //   3. batch.update theirUid's document: remove myUid from 'followers' using arrayRemove
-  //   4. await batch.commit()
+  // Adds a comment to a post's sub-collection.
+  // Comments live at: posts/{postId}/comments/{commentId}
+  // Using a sub-collection instead of an inline array avoids the 1MB Firestore
+  // document limit that would eventually be hit if comments were stored inside the post.
+  static Future<void> addComment({
+    required String postId,
+    required String userId,
+    required String username,
+    required String text,
+  }) async {
+    await _db
+        .collection('posts')
+        .doc(postId)
+        .collection('comments') // sub-collection under this specific post
+        .add({
+      'userId':    userId,
+      'username':  username,   // cached so we don't need a user lookup to display comments
+      'text':      text,       // the actual comment text
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // Returns a live stream of comments for one post, ordered oldest first.
+  // The comment bottom sheet uses StreamBuilder so new comments appear instantly.
+  static Stream<QuerySnapshot> getCommentsStream(String postId) {
+    return _db
+        .collection('posts')
+        .doc(postId)
+        .collection('comments')
+        .orderBy('createdAt') // oldest comment at top, newest at bottom (like a chat)
+        .snapshots();
+  }
+
+  // ── Follow ────────────────────────────────────────────────────────────────────
+
+  // Follows a user — updates BOTH users' documents in one atomic batch.
+  // A Firestore batch means: if one update fails, both fail together.
+  // This prevents the inconsistent state where I follow you but your follower
+  // count doesn't increase (or vice versa).
+  static Future<void> followUser(String myUid, String theirUid) async {
+    final batch = _db.batch(); // group multiple writes into one atomic operation
+
+    // Add theirUid to MY following list (I am now following them)
+    batch.update(_db.collection('users').doc(myUid), {
+      'following': FieldValue.arrayUnion([theirUid]),
+    });
+
+    // Add myUid to THEIR followers list (they have gained a new follower)
+    batch.update(_db.collection('users').doc(theirUid), {
+      'followers': FieldValue.arrayUnion([myUid]),
+    });
+
+    await batch.commit(); // both updates happen simultaneously
+  }
+
+  // Unfollows a user — same atomic batch pattern as followUser.
+  static Future<void> unfollowUser(String myUid, String theirUid) async {
+    final batch = _db.batch();
+
+    // Remove theirUid from MY following list
+    batch.update(_db.collection('users').doc(myUid), {
+      'following': FieldValue.arrayRemove([theirUid]),
+    });
+
+    // Remove myUid from THEIR followers list
+    batch.update(_db.collection('users').doc(theirUid), {
+      'followers': FieldValue.arrayRemove([myUid]),
+    });
+
+    await batch.commit();
+  }
 }
